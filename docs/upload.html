@@ -110,6 +110,15 @@ document.getElementById("go").onclick = async (ev) => {
     log("dispatched – watch Actions, then refresh the browse page.");
   } catch (e) {
     log("ERROR: " + e.message);
+    if (e.status === 403 && /contents\/incoming/.test(e.message)) {
+      log("hint: this PAT can't write to the packages repo.");
+      log("  fine-grained: give it Contents read+write on bleezhi/packages");
+      log("  (plus Actions read+write on the distro repo for the dispatch step),");
+      log("  or use a classic PAT with repo + workflow scopes.");
+    } else if (e.status === 404 && /dispatches/.test(e.message)) {
+      log("hint: distro repo or workflow not found – push bleelinux (with");
+      log("  .github/workflows/packages.yml on main) first.");
+    }
   } finally {
     btn.disabled = false;
   }

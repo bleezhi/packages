@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>upload – bleelinux packages</title>
+<style>
+:root { color-scheme: dark; }
+body { font-family: system-ui, sans-serif; max-width: 700px; margin: 2em auto; padding: 0 1em; background: #111; color: #eee; }
+a { color: #7cc4ff; }
+label { display: block; margin: .8em 0 .2em; }
+input { width: 100%; box-sizing: border-box; background: #222; color: #eee; border: 1px solid #555; border-radius: 4px; padding: .4em; }
+button { background: #2a2a2a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: .5em 1em; cursor: pointer; margin-top: 1em; }
+button:hover { background: #3a3a3a; }
+button:disabled { opacity: .5; cursor: default; }
+pre { background: #222; padding: .8em; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+.muted { color: #999; }
+.warn { color: #ffb86b; }
+</style>
+</head>
+<body>
+<h1>upload packages</h1>
+<p><a href="index.html">← browse</a></p>
+<p class="muted">Uploads <code>.bleepkg</code> files to a release lane, then triggers
+the <code>packages</code> workflow to rebuild the index — no CLI needed.
+Token stays in this page's memory only, never stored.</p>
+<p class="warn">Token needs <code>contents:write</code> + <code>actions:write</code>
+(classic PAT: <code>repo</code> + <code>workflow</code>).</p>
+
+<label>GitHub org/user <input id="org" value="bleezhi"></label>
+<label>Packages repo <input id="repo" value="packages"></label>
+<label>Distro repo (owns the packages workflow) <input id="distro" value="bleelinux"></label>
+<label>Lane / release tag <input id="tag" value="core-x86_64-glibc"></label>
+<label>Token <input id="token" type="password" placeholder="ghp_…"></label>
+<label>Files <input id="files" type="file" multiple accept=".bleepkg"></label>
+
+<button id="go">upload + rebuild index</button>
+<pre id="log">idle</pre>
+
+<script>
+const log = (m) => {
+  const el = document.getElementById("log");
+  if (el.textContent === "idle") el.textContent = "";
+  el.textContent += m + "\n";
+};
+const api = async (method, url, token, body, extraHeaders) => {
+  const r = await fetch(url, {
+    method,
+    headers: Object.assign({
+      "Accept": "application/vnd.github+json",
+      "Authorization": "Bearer " + token,
+      "X-GitHub-Api-Version": "2022-11-28",
+    }, extraHeaders || {}),
+    body,
+  });
+  if (!r.ok) throw new Error(method + " " + url + " → HTTP " + r.status + ": " + (await r.text()).slice(0, 200));
+  return r.status === 204 ? null : r.json();
+};
+
+document.getElementById("go").onclick = async (ev) => {
+  const btn = ev.target;
+  btn.disabled = true;
+  try {
+    const org = document.getElementById("org").value.trim();
+    const repo = document.getElementById("repo").value.trim();
+    const distro = document.getElementById("distro").value.trim();
+    const tag = document.getElementById("tag").value.trim();
+    const token = document.getElementById("token").value.trim();
+    const files = document.getElementById("files").files;
+    if (!org || !repo || !tag || !token) throw new Error("org, repo, tag, token required");
+    if (!files.length) throw new Error("pick at least one .bleepkg");
+
+    // 1. release (get or create)
+    log("release " + tag + " …");
+    let rel;
+    try {
+      rel = await api("GET", `https://api.github.com/repos/${org}/${repo}/releases/tags/${tag}`, token);
+      log("exists: " + rel.id);
+    } catch (e) {
+      if (!String(e.message).includes("404")) throw e;
+      rel = await api("POST", `https://api.github.com/repos/${org}/${repo}/releases`, token,
+        JSON.stringify({ tag_name: tag, name: tag, generate_release_notes: false }));
+      log("created: " + rel.id);
+    }
+
+    // 2. upload assets
+    for (const f of files) {
+      log("upload " + f.name + " (" + f.size + " B) …");
+      const upUrl = rel.upload_url.replace(/\{.*$/, "") + "?name=" + encodeURIComponent(f.name);
+      await api("POST", upUrl, token, f, { "Content-Type": "application/octet-stream" });
+      log("ok");
+    }
+
+    // 3. dispatch index rebuild (source=release pulls the assets back)
+    log("dispatch packages workflow …");
+    await api("POST", `https://api.github.com/repos/${org}/${distro}/actions/workflows/packages.yml/dispatches`, token,
+      JSON.stringify({ ref: "main", inputs: { tag, source: "release" } }));
+    log("dispatched – watch Actions, then refresh the browse page.");
+  } catch (e) {
+    log("ERROR: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>

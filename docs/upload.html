@@ -21,9 +21,12 @@ pre { background: #222; padding: .8em; border-radius: 4px; overflow-x: auto; whi
 <body>
 <h1>upload packages</h1>
 <p><a href="index.html">← browse</a></p>
-<p class="muted">Uploads <code>.bleepkg</code> files to a release lane, then triggers
-the <code>packages</code> workflow to rebuild the index — no CLI needed.
+<p class="muted">Stages <code>.bleepkg</code> files into the packages repo, then triggers
+the <code>packages</code> workflow to index and publish them — no CLI needed.
 Token stays in this page's memory only, never stored.</p>
+<p class="muted">Why staging? <code>uploads.github.com</code> sends no CORS headers,
+so browsers can't POST release assets directly. Staging goes through
+<code>api.github.com</code> (CORS-enabled); CI does the release upload.</p>
 <p class="warn">Token needs <code>contents:write</code> + <code>actions:write</code>
 (classic PAT: <code>repo</code> + <code>workflow</code>).</p>
 
@@ -34,7 +37,7 @@ Token stays in this page's memory only, never stored.</p>
 <label>Token <input id="token" type="password" placeholder="ghp_…"></label>
 <label>Files <input id="files" type="file" multiple accept=".bleepkg"></label>
 
-<button id="go">upload + rebuild index</button>
+<button id="go">stage + rebuild index</button>
 <pre id="log">idle</pre>
 
 <script>
@@ -43,19 +46,31 @@ const log = (m) => {
   if (el.textContent === "idle") el.textContent = "";
   el.textContent += m + "\n";
 };
-const api = async (method, url, token, body, extraHeaders) => {
+const api = async (method, url, token, body) => {
   const r = await fetch(url, {
     method,
-    headers: Object.assign({
+    headers: {
       "Accept": "application/vnd.github+json",
       "Authorization": "Bearer " + token,
       "X-GitHub-Api-Version": "2022-11-28",
-    }, extraHeaders || {}),
-    body,
+      "Content-Type": "application/json",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(method + " " + url + " → HTTP " + r.status + ": " + (await r.text()).slice(0, 200));
+  if (!r.ok) {
+    const t = await r.text();
+    const err = new Error(method + " " + url + " → HTTP " + r.status + ": " + t.slice(0, 200));
+    err.status = r.status;
+    throw err;
+  }
   return r.status === 204 ? null : r.json();
 };
+const readB64 = (file) => new Promise((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(fr.result.split(",", 2)[1]);
+  fr.onerror = () => reject(fr.error);
+  fr.readAsDataURL(file);
+});
 
 document.getElementById("go").onclick = async (ev) => {
   const btn = ev.target;
@@ -67,34 +82,31 @@ document.getElementById("go").onclick = async (ev) => {
     const tag = document.getElementById("tag").value.trim();
     const token = document.getElementById("token").value.trim();
     const files = document.getElementById("files").files;
-    if (!org || !repo || !tag || !token) throw new Error("org, repo, tag, token required");
+    if (!org || !repo || !distro || !tag || !token) throw new Error("org, repo, distro, tag, token required");
     if (!files.length) throw new Error("pick at least one .bleepkg");
 
-    // 1. release (get or create)
-    log("release " + tag + " …");
-    let rel;
-    try {
-      rel = await api("GET", `https://api.github.com/repos/${org}/${repo}/releases/tags/${tag}`, token);
-      log("exists: " + rel.id);
-    } catch (e) {
-      if (!String(e.message).includes("404")) throw e;
-      rel = await api("POST", `https://api.github.com/repos/${org}/${repo}/releases`, token,
-        JSON.stringify({ tag_name: tag, name: tag, generate_release_notes: false }));
-      log("created: " + rel.id);
-    }
-
-    // 2. upload assets
+    // 1. stage files via Contents API (CORS-safe, unlike uploads.github.com)
     for (const f of files) {
-      log("upload " + f.name + " (" + f.size + " B) …");
-      const upUrl = rel.upload_url.replace(/\{.*$/, "") + "?name=" + encodeURIComponent(f.name);
-      await api("POST", upUrl, token, f, { "Content-Type": "application/octet-stream" });
-      log("ok");
+      const path = `incoming/${tag}/${f.name}`;
+      log("stage " + path + " (" + f.size + " B) …");
+      const content = await readB64(f);
+      const body = { message: `stage ${f.name} for ${tag}`, content };
+      try {
+        const existing = await api("GET",
+          `https://api.github.com/repos/${org}/${repo}/contents/${path}?ref=main`, token);
+        body.sha = existing.sha;
+        log("exists – overwriting");
+      } catch (e) {
+        if (e.status !== 404) throw e;
+      }
+      await api("PUT", `https://api.github.com/repos/${org}/${repo}/contents/${path}`, token, body);
+      log("staged");
     }
 
-    // 3. dispatch index rebuild (source=release pulls the assets back)
+    // 2. dispatch index rebuild (CI consumes incoming/, publishes release)
     log("dispatch packages workflow …");
     await api("POST", `https://api.github.com/repos/${org}/${distro}/actions/workflows/packages.yml/dispatches`, token,
-      JSON.stringify({ ref: "main", inputs: { tag, source: "release" } }));
+      { ref: "main", inputs: { tag, source: "incoming" } });
     log("dispatched – watch Actions, then refresh the browse page.");
   } catch (e) {
     log("ERROR: " + e.message);

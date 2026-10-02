@@ -44,30 +44,46 @@ const REPO = "packages";
 const LANES = ["core-x86_64-glibc", "core-aarch64-glibc"];
 // --------------------------------------------
 const base = `https://github.com/${ORG}/${REPO}/releases/download`;
+// raw.githubusercontent.com sends CORS headers; release CDNs do not,
+// so the browser reads lane indexes from git, not from release assets.
+const rawBase = `https://raw.githubusercontent.com/${ORG}/${REPO}/main`;
 document.getElementById("actions").href =
   `https://github.com/${ORG}/bleelinux/actions/workflows/packages.yml`;
 
 const lanesEl = document.getElementById("lanes");
 const params = new URLSearchParams(location.search);
-let lane = params.get("lane") || LANES[0];
+let lane = params.get("lane") || null;
 
-LANES.forEach(l => {
-  const b = document.createElement("button");
-  b.textContent = l;
-  if (l === lane) b.classList.add("active");
-  b.onclick = () => { location.search = "?lane=" + encodeURIComponent(l); };
-  lanesEl.appendChild(b);
-});
+async function loadLanes() {
+  try {
+    const r = await fetch(`${rawBase}/lanes.json`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const lanes = await r.json();
+    if (Array.isArray(lanes) && lanes.length) return lanes;
+  } catch (e) { /* fall through to built-ins */ }
+  return LANES;
+}
 
-document.getElementById("lane-name").textContent = lane;
-const addCmd = `bleep repo add ${lane.split("-")[0]} ${base}/${lane}\nbleep repo refresh`;
-const addPre = document.getElementById("add-cmd");
-addPre.innerHTML = "";
-addPre.appendChild(document.createTextNode(addCmd + "\n"));
-const copy = document.createElement("button");
-copy.textContent = "copy";
-copy.onclick = () => navigator.clipboard.writeText(addCmd);
-addPre.appendChild(copy);
+function renderLanes(lanes) {
+  if (!lane || !lanes.includes(lane)) lane = lanes[0];
+  lanes.forEach(l => {
+    const b = document.createElement("button");
+    b.textContent = l;
+    if (l === lane) b.classList.add("active");
+    b.onclick = () => { location.search = "?lane=" + encodeURIComponent(l); };
+    lanesEl.appendChild(b);
+  });
+  document.getElementById("lane-name").textContent = lane;
+  const addCmd = `bleep repo add ${lane.split("-")[0]} ${base}/${lane}\nbleep repo refresh`;
+  const addPre = document.getElementById("add-cmd");
+  addPre.innerHTML = "";
+  addPre.appendChild(document.createTextNode(addCmd + "\n"));
+  const copy = document.createElement("button");
+  copy.textContent = "copy";
+  copy.onclick = () => navigator.clipboard.writeText(addCmd);
+  addPre.appendChild(copy);
+  loadPackages();
+}
 
 function fmtSize(n) {
   if (n < 1024) return n + " B";
@@ -77,7 +93,8 @@ function fmtSize(n) {
   return s.toFixed(1) + " " + u[i];
 }
 
-fetch(`${base}/${lane}/packages.json`)
+function loadPackages() {
+fetch(`${rawBase}/lanes/${lane}/packages.json`)
   .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
   .then(idx => {
     const tb = document.getElementById("pkgs");
@@ -110,6 +127,9 @@ fetch(`${base}/${lane}/packages.json`)
     document.getElementById("pkgs").innerHTML =
       `<tr><td colspan="4" class="muted">no index yet (${e.message}) – publish the lane first</td></tr>`;
   });
+}
+
+loadLanes().then(renderLanes);
 </script>
 </body>
 </html>
